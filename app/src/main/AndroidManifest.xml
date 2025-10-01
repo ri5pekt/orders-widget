@@ -2,7 +2,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Needed for ConnectivityManager / LinkProperties / VALIDATED checks -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Optional, improves Wi-Fi details on some OEMs (Samsung) -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- Notifications (Android 13+) for your alerts -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -34,6 +43,19 @@
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/orders_widget_info" />
+        </receiver>
+
+        <receiver
+            android:name=".ExtendedOrdersWidgetReceiver"
+            android:exported="true"
+            android:label="Orders Widget — Extended">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/extended_orders_widget_info" />
         </receiver>
 
         <provider

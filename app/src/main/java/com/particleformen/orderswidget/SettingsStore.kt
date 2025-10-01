@@ -1,3 +1,4 @@
+// SettingsStore.kt
 package com.particleformen.orderswidget
 
 import android.content.Context

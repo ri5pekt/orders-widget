@@ -60,6 +60,7 @@ dependencies {
     // Glance stores widget state in Preferences DataStore
     implementation("androidx.compose.material3:material3:1.3.2")
 
+    implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:4.12.0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
