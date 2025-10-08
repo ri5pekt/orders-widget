@@ -2,4 +2,5 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Expose internal app files/ as content:// -->
     <files-path name="internal" path="."/>
+    <files-path name="widget_thumbs" path="widget_thumbs/" />
 </paths>

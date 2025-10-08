@@ -60,6 +60,7 @@ private fun SettingsRoot(activity: ComponentActivity) {
     val thresholdState     = remember { mutableStateOf(3) }
     val cooldownState      = remember { mutableStateOf(60) }
     val alertsEnabledState = remember { mutableStateOf(true) }
+    val showTopProducts    = remember { mutableStateOf(false) }
 
     // Text field states (so user can type freely)
     val thresholdText = remember { mutableStateOf("3") }
@@ -83,6 +84,7 @@ private fun SettingsRoot(activity: ComponentActivity) {
         thresholdState.value = threshold
         cooldownState.value  = cooldown
         alertsEnabledState.value = enabled
+        showTopProducts.value = (prefs[PrefKeys.SHOW_TOP_PRODUCTS] ?: 0) == 1
 
         thresholdText.value = threshold.toString()
         cooldownText.value  = cooldown.toString()
@@ -119,6 +121,26 @@ private fun SettingsRoot(activity: ComponentActivity) {
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(20.dp)
                 ) {
+                    // Show top products in widget
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Show top products in widget")
+                        Switch(
+                            checked = showTopProducts.value,
+                            onCheckedChange = { on ->
+                                showTopProducts.value = on
+                                scope.launch {
+                                    activity.applicationContext.appDataStore.edit {
+                                        it[PrefKeys.SHOW_TOP_PRODUCTS] = if (on) 1 else 0
+                                    }
+                                }
+                            }
+                        )
+                    }
+
                     // Notifications permission row
                     Row(
                         modifier = Modifier.fillMaxWidth(),

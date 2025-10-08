@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.first
 import kotlin.math.max
+import androidx.datastore.preferences.core.intPreferencesKey
 
 // App-level DataStore (same name you used in MainActivity)
 val Context.appDataStore: DataStore<Preferences> by preferencesDataStore(name = "orders_widget")
@@ -32,4 +33,13 @@ suspend fun writeLastAlertAt(ctx: Context, ts: Long) {
 suspend fun readCooldownMinutes(ctx: Context): Int {
     val prefs = ctx.appDataStore.data.first()
     return (prefs[PrefKeys.COOLDOWN_MINUTES] ?: 60).coerceAtLeast(0)
+}
+
+suspend fun readShowTopProducts(ctx: Context): Boolean {
+    val prefs = ctx.appDataStore.data.first()
+    return (prefs[PrefKeys.SHOW_TOP_PRODUCTS] ?: 0) == 1
+}
+
+suspend fun writeShowTopProducts(ctx: Context, enabled: Boolean) {
+    ctx.appDataStore.edit { it[PrefKeys.SHOW_TOP_PRODUCTS] = if (enabled) 1 else 0 }
 }

@@ -1,16 +1,8 @@
 // OrdersWidget.kt
-
 package com.particleformen.orderswidget
 
 import android.appwidget.AppWidgetManager
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
-import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.DpSize
@@ -60,21 +52,14 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
-import kotlinx.coroutines.CoroutineExceptionHandler
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
-import java.net.ConnectException
-import java.net.InetAddress
 import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
 
 // -------------------------------------------------------------
 // Pref keys
@@ -88,6 +73,8 @@ object PrefKeys {
     val ALERTS_ENABLED   = intPreferencesKey("alerts_enabled")
     val LAST_ALERT_AT    = longPreferencesKey("last_alert_at")
     val COOLDOWN_MINUTES = intPreferencesKey("cooldown_minutes")
+
+    val SHOW_TOP_PRODUCTS  = intPreferencesKey("show_top_products")
 }
 
 // -------------------------------------------------------------
@@ -102,117 +89,12 @@ private const val SUMMARY_URL =
 private const val API_KEY =
     "pFM_9rJ8dJx7F3w6uQ1Zk5Vt2Nn8Bb4Hs0Ly3Cq7Wd9Xa2Pe6Rm1Tg5Uk9Mh3"
 
-// Slightly longer timeouts for mobile links
+// Simple OkHttp client
 private val HTTP by lazy {
     OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
-        .build()
-}
-
-// -------------------------------------------------------------
-// Minimal logging helpers (Logcat + file)
-// -------------------------------------------------------------
-
-private fun logMsg(ctx: Context, where: String, msg: String) {
-    Log.i(TAG, "$where: $msg")
-    FileLogger.append(ctx, "$where: $msg")
-}
-private fun logWarn(ctx: Context, where: String, msg: String) {
-    Log.w(TAG, "$where: $msg")
-    FileLogger.append(ctx, "$where WARN: $msg")
-}
-private fun logErr(ctx: Context, where: String, t: Throwable) {
-    Log.e(TAG, "$where: ${t.javaClass.simpleName}: ${t.message}", t)
-    FileLogger.append(ctx, "$where ERROR: ${t.javaClass.simpleName}: ${t.message}")
-}
-private fun ceh(ctx: Context) = CoroutineExceptionHandler { _, t -> logErr(ctx, "Coroutine", t) }
-
-// -------------------------------------------------------------
-// Network helpers: prefer validated WIFI, else CELL; request CELL if needed
-// -------------------------------------------------------------
-
-private data class NetChoice(val network: Network, val via: String)
-
-private fun chooseValidatedNetwork(ctx: Context): NetChoice? {
-    val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-    var wifi: NetChoice? = null
-    var cell: NetChoice? = null
-    var any:  NetChoice? = null
-    for (n in cm.allNetworks.orEmpty()) {
-        val caps = cm.getNetworkCapabilities(n) ?: continue
-        val ok = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-        if (!ok) continue
-        when {
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)     -> if (wifi == null) wifi = NetChoice(n, "WIFI")
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> if (cell == null) cell = NetChoice(n, "CELL")
-            else -> if (any == null) any = NetChoice(n, "OTHER")
-        }
-    }
-    return wifi ?: cell ?: any
-}
-
-// Works on API 24+. We implement our own timeout and swallow OEM SecurityException.
-private suspend fun requestCellular(ctx: Context, timeoutMs: Long = 1800): Network? =
-    suspendCancellableCoroutine { cont ->
-        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val req = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-
-        val handler = Handler(Looper.getMainLooper())
-        val cb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                if (cont.isActive) cont.resume(network)
-                runCatching { cm.unregisterNetworkCallback(this) }
-            }
-            override fun onUnavailable() {
-                if (cont.isActive) cont.resume(null)
-                runCatching { cm.unregisterNetworkCallback(this) }
-            }
-        }
-
-        val timeoutRunnable = Runnable {
-            if (cont.isActive) {
-                cont.resume(null)
-                runCatching { cm.unregisterNetworkCallback(cb) }
-            }
-        }
-        handler.postDelayed(timeoutRunnable, timeoutMs)
-
-        try { cm.requestNetwork(req, cb) }
-        catch (se: SecurityException) {
-            // Some Samsung firmwares are picky here; just log and fall back.
-            logErr(ctx, "requestCellular", se)
-            handler.removeCallbacks(timeoutRunnable)
-            runCatching { cm.unregisterNetworkCallback(cb) }
-            cont.resume(null)
-        }
-
-        cont.invokeOnCancellation {
-            handler.removeCallbacks(timeoutRunnable)
-            runCatching { cm.unregisterNetworkCallback(cb) }
-        }
-    }
-
-// Build an OkHttp client bound to the chosen network, with explicit DNS to avoid SAM issues.
-private fun clientForNetwork(choice: NetChoice): OkHttpClient {
-    val dns: Dns =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            object : Dns {
-                override fun lookup(hostname: String): List<InetAddress> =
-                    choice.network.getAllByName(hostname).toList()
-            }
-        } else {
-            Dns.SYSTEM
-        }
-
-    return HTTP.newBuilder()
-        .socketFactory(choice.network.socketFactory)
-        .dns(dns)
         .build()
 }
 
@@ -343,23 +225,14 @@ class FetchMockAction : ActionCallback {
         val isLoading = androidx.glance.appwidget.state.getAppWidgetState(
             context, PreferencesGlanceStateDefinition, glanceId
         )[PrefKeys.LOADING] == 1
-        if (isLoading) {
-            logWarn(context, "manual", "tap ignored; already LOADING=1")
-            return
-        }
+        if (isLoading) return
 
         updateAppWidgetState(context, PreferencesGlanceStateDefinition, glanceId) { p ->
             p.toMutablePreferences().apply { this[PrefKeys.LOADING] = 1 }
         }
         OrdersWidget().update(context, glanceId)
-        logMsg(context, "manual", "tap -> fetch start")
 
-        val result = try {
-            fetchOrdersSummary(context, SUMMARY_URL)
-        } catch (t: Throwable) {
-            logErr(context, "manual fetch", t)
-            Result.failure(t)
-        }
+        val result = fetchOrdersSummary(context, SUMMARY_URL)
 
         updateAppWidgetState(context, PreferencesGlanceStateDefinition, glanceId) { p ->
             p.toMutablePreferences().apply {
@@ -368,6 +241,7 @@ class FetchMockAction : ActionCallback {
                     this[PrefKeys.COUNT]   = dto.count
                     this[PrefKeys.UPDATED] = dto.hhmm
 
+                    // Optional alerts (assumes helpers exist in your project)
                     val (enabled, threshold) = readAlertSettings(context)
                     if (enabled && dto.count < threshold) {
                         val now = System.currentTimeMillis()
@@ -379,10 +253,8 @@ class FetchMockAction : ActionCallback {
                             writeLastAlertAt(context, now)
                         }
                     }
-                    logMsg(context, "manual", "success count=${dto.count} hhmm=${dto.hhmm}")
                 } else {
                     this[PrefKeys.UPDATED] = "ERR"
-                    logWarn(context, "manual", "failure -> ERR (${result.exceptionOrNull()?.javaClass?.simpleName})")
                 }
                 this[PrefKeys.LOADING] = 0
             }
@@ -411,93 +283,50 @@ private fun isoUtcToLocalHhMm(iso: String): String {
 }
 
 // -------------------------------------------------------------
-// Network fetch with retries + validated-network binding
+// Network fetch (simple, only error logs)
 // -------------------------------------------------------------
 
 private data class OrdersSummaryDto(val count: Int, val hhmm: String)
 
-private suspend fun <T> withNetRetries(
+private suspend fun fetchOrdersSummary(
     ctx: Context,
-    attempts: Int = 3,
-    baseDelayMs: Long = 400,
-    block: suspend () -> T
-): T {
-    var last: Throwable? = null
-    repeat(attempts) { i ->
-        try { return block() } catch (t: Throwable) {
-            last = t
-            val retryable = t is java.net.UnknownHostException ||
-                    t is java.net.SocketTimeoutException ||
-                    t is ConnectException
-            if (!retryable || i == attempts - 1) throw t
-            val backoff = baseDelayMs * (1 shl i) // 400, 800
-            logWarn(ctx, "net", "retry ${i+1}/$attempts after ${t.javaClass.simpleName} (sleep=${backoff}ms)")
-            // NOTE: we are inside a suspend function; delay() is OK here
-            delay(backoff)
+    url: String
+): Result<OrdersSummaryDto> = withContext(Dispatchers.IO) {
+    try {
+        val bust = System.currentTimeMillis()
+        val sep = if (url.contains("?")) "&" else "?"
+        val fullUrl = "$url${sep}key=$API_KEY&t=$bust"
+
+        val req = Request.Builder()
+            .url(fullUrl)
+            .get()
+            .header("Cache-Control", "no-cache")
+            .build()
+
+        HTTP.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                Log.e(TAG, "fetch failed: http_${resp.code}")
+                return@withContext Result.failure(Exception("http_${resp.code}"))
+            }
+
+            val body = resp.body?.string().orEmpty()
+            val j     = JSONObject(body)
+            val count = j.optInt("count", -1)
+            val iso   = j.optString("updated_at_utc", j.optString("current_time_utc"))
+            val hhmm  = isoUtcToLocalHhMm(iso)
+
+            if (count < 0) {
+                Log.e(TAG, "fetch failed: bad_json")
+                return@withContext Result.failure(Exception("bad_json"))
+            }
+
+            Result.success(OrdersSummaryDto(count, hhmm))
         }
+    } catch (t: Throwable) {
+        Log.e(TAG, "fetch failed: ${t.javaClass.simpleName}: ${t.message}")
+        Result.failure(t)
     }
-    throw last ?: IllegalStateException("unreachable")
 }
-
-private suspend fun fetchOrdersSummary(ctx: Context, url: String): Result<OrdersSummaryDto> =
-    withContext(Dispatchers.IO) {
-        try {
-            // 1) Pick a validated network (WIFI preferred, else CELL)
-            var choice = chooseValidatedNetwork(ctx)
-
-            // 2) If none validated yet, briefly request CELL (browser-like behavior)
-            if (choice == null) {
-                logWarn(ctx, "fetch", "no validated network; requesting CELL briefly")
-                val cell = requestCellular(ctx)
-                if (cell != null) choice = NetChoice(cell, "CELL(requested)")
-            }
-
-            if (choice == null) {
-                logWarn(ctx, "fetch", "still no validated network → abort")
-                return@withContext Result.failure(IllegalStateException("no_internet"))
-            }
-
-            logMsg(ctx, "fetch", "using network=${choice.via}")
-
-            val bust = System.currentTimeMillis()
-            val sep = if (url.contains("?")) "&" else "?"
-            val fullUrl = "$url${sep}key=$API_KEY&t=$bust"
-
-            val dto = withNetRetries(ctx) {
-                val client = clientForNetwork(choice!!)
-                val req = Request.Builder()
-                    .url(fullUrl)
-                    .get()
-                    .header("Cache-Control", "no-cache")
-                    .build()
-
-                val t0 = System.nanoTime()
-                val resp = client.newCall(req).execute()
-                val ms = (System.nanoTime() - t0) / 1_000_000
-
-                if (!resp.isSuccessful) {
-                    resp.close()
-                    logWarn(ctx, "fetch", "http=${resp.code} in ${ms}ms")
-                    throw Exception("http_${resp.code}")
-                }
-
-                val body = resp.body?.string().orEmpty()
-                val j     = JSONObject(body)
-                val count = j.optInt("count", -1)
-                val iso   = j.optString("updated_at_utc", j.optString("current_time_utc"))
-                val hhmm  = isoUtcToLocalHhMm(iso)
-                logMsg(ctx, "fetch", "ok in ${ms}ms count=$count hhmm=$hhmm")
-
-                if (count < 0) throw Exception("bad_json")
-                OrdersSummaryDto(count, hhmm)
-            }
-
-            Result.success(dto)
-        } catch (t: Throwable) {
-            logErr(ctx, "fetch", t)
-            Result.failure(t)
-        }
-    }
 
 // -------------------------------------------------------------
 // Work scheduling (idempotent)
@@ -528,11 +357,10 @@ class OrdersWidgetReceiver : GlanceAppWidgetReceiver() {
 
     override fun onEnabled(context: Context) {
         super.onEnabled(context)
-        val pr = try { goAsync() } catch (_: Throwable) { null } // Samsung quirk guard
 
         ensureAutoRefreshScheduled(context)
 
-        CoroutineScope(Dispatchers.IO + ceh(context)).launch {
+        CoroutineScope(Dispatchers.IO).launch {
             val manager = GlanceAppWidgetManager(context)
             val ids = manager.getGlanceIds(OrdersWidget::class.java)
 
@@ -546,8 +374,7 @@ class OrdersWidgetReceiver : GlanceAppWidgetReceiver() {
                 }
                 OrdersWidget().update(context, id)
 
-                val r = try { fetchOrdersSummary(context, SUMMARY_URL) }
-                catch (t: Throwable) { logErr(context, "onEnabled fetch", t); Result.failure(t) }
+                val r = fetchOrdersSummary(context, SUMMARY_URL)
 
                 updateAppWidgetState(context, PreferencesGlanceStateDefinition, id) { p ->
                     p.toMutablePreferences().apply {
@@ -555,17 +382,15 @@ class OrdersWidgetReceiver : GlanceAppWidgetReceiver() {
                             val dto = r.getOrNull()!!
                             this[PrefKeys.COUNT]   = dto.count
                             this[PrefKeys.UPDATED] = dto.hhmm
-                            logMsg(context, "onEnabled", "success count=${dto.count} hhmm=${dto.hhmm}")
                         } else {
                             this[PrefKeys.UPDATED] = "ERR"
-                            logWarn(context, "onEnabled", "failure → ERR (${r.exceptionOrNull()?.javaClass?.simpleName})")
                         }
                         this[PrefKeys.LOADING] = 0
                     }
                 }
                 OrdersWidget().update(context, id)
             }
-        }.invokeOnCompletion { pr?.finish() }
+        }
     }
 
     override fun onUpdate(
@@ -576,7 +401,7 @@ class OrdersWidgetReceiver : GlanceAppWidgetReceiver() {
         super.onUpdate(context, appWidgetManager, appWidgetIds)
         ensureAutoRefreshScheduled(context)
 
-        CoroutineScope(Dispatchers.IO + ceh(context)).launch {
+        CoroutineScope(Dispatchers.IO).launch {
             val gm = GlanceAppWidgetManager(context)
             appWidgetIds.forEach { appWidgetId ->
                 val glanceId = gm.getGlanceIdBy(appWidgetId) ?: return@forEach
@@ -601,8 +426,7 @@ class OrdersWidgetReceiver : GlanceAppWidgetReceiver() {
                     }
                     OrdersWidget().update(context, glanceId)
 
-                    val r = try { fetchOrdersSummary(context, SUMMARY_URL) }
-                    catch (t: Throwable) { logErr(context, "onUpdate fetch", t); Result.failure(t) }
+                    val r = fetchOrdersSummary(context, SUMMARY_URL)
 
                     updateAppWidgetState(context, PreferencesGlanceStateDefinition, glanceId) { p ->
                         p.toMutablePreferences().apply {
@@ -610,10 +434,8 @@ class OrdersWidgetReceiver : GlanceAppWidgetReceiver() {
                                 val dto = r.getOrNull()!!
                                 this[PrefKeys.COUNT]   = dto.count
                                 this[PrefKeys.UPDATED] = dto.hhmm
-                                logMsg(context, "onUpdate", "success count=${dto.count} hhmm=${dto.hhmm}")
                             } else {
                                 this[PrefKeys.UPDATED] = "ERR"
-                                logWarn(context, "onUpdate", "failure → ERR (${r.exceptionOrNull()?.javaClass?.simpleName})")
                             }
                             this[PrefKeys.LOADING] = 0
                         }
@@ -660,6 +482,7 @@ class OrdersAutoRefreshWorker(
                             this[PrefKeys.COUNT]   = dto.count
                             this[PrefKeys.UPDATED] = dto.hhmm
 
+                            // Optional alerts (assumes helpers exist)
                             val (enabled, threshold) = readAlertSettings(applicationContext)
                             if (enabled && dto.count < threshold) {
                                 val now = System.currentTimeMillis()
@@ -671,10 +494,8 @@ class OrdersAutoRefreshWorker(
                                     writeLastAlertAt(applicationContext, now)
                                 }
                             }
-                            logMsg(applicationContext, "worker", "success count=${dto.count} hhmm=${dto.hhmm}")
                         } else {
                             this[PrefKeys.UPDATED] = "ERR"
-                            logWarn(applicationContext, "worker", "failure → ERR (${r.exceptionOrNull()?.javaClass?.simpleName})")
                         }
                         this[PrefKeys.LOADING] = 0
                     }
@@ -684,7 +505,8 @@ class OrdersAutoRefreshWorker(
 
             androidx.work.ListenableWorker.Result.success()
         } catch (t: Throwable) {
-            logErr(applicationContext, "worker", t)
+            // Only error log on failure
+            Log.e(TAG, "worker fetch failed: ${t.javaClass.simpleName}: ${t.message}")
             ids.forEach { id ->
                 updateAppWidgetState(applicationContext, PreferencesGlanceStateDefinition, id) { p ->
                     p.toMutablePreferences().apply {
